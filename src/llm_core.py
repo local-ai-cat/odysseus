@@ -20,7 +20,12 @@ class LLMConfig:
     DEFAULT_MAX_TOKENS = 0
     MAX_RETRIES = 3
     RETRY_DELAY = 0.5
-    STREAM_TIMEOUT = 300
+    # Streaming read timeout. A LOCAL on-device server (e.g. Local AI Cat / MLX)
+    # may take a while to COLD-LOAD a large model before the first token streams
+    # back — a 120B can exceed the old 300s. The connect timeout stays short (3s)
+    # so a genuinely-down endpoint still fails fast; this only governs the wait
+    # for the first/next byte once connected.
+    STREAM_TIMEOUT = 600
 
 
 # Cache for LLM responses
