@@ -1,8 +1,12 @@
 """
 chroma_client.py
 
-Singleton ChromaDB HTTP client.
-Connects to a ChromaDB instance running as a standalone service.
+Singleton ChromaDB client with dual transport.
+
+When CHROMADB_HOST is set, connects over HTTP to a standalone ChromaDB
+service (e.g. `docker compose up chromadb`). Otherwise it falls back to an
+embedded, in-process PersistentClient that writes the vector store to disk —
+no server, no Docker, fully self-contained.
 """
 
 import os
@@ -37,33 +41,34 @@ def get_chroma_client():
     global _client
     if _client is not None:
         return _client
-
     try:
         import chromadb
     except ImportError as e:
         raise RuntimeError(
-            "ChromaDB integration is not installed. Install the optional "
-            "dependency with: pip install chromadb-client"
+            "ChromaDB integration is not installed. Install it with: pip install chromadb"
         ) from e
 
-    host = os.getenv("CHROMADB_HOST", "localhost")
-    port = int(os.getenv("CHROMADB_PORT", "8100"))
+    host = os.getenv("CHROMADB_HOST")
+    if host:
+        port = int(os.getenv("CHROMADB_PORT", "8100"))
+        if not _port_open(host, port):
+            raise RuntimeError(
+                f"ChromaDB is not reachable at {host}:{port}. Start the service "
+                f"(e.g. `docker compose up chromadb`) or unset CHROMADB_HOST to use "
+                f"the built-in in-process store."
+            )
+        client = chromadb.HttpClient(host=host, port=port)
+        client.heartbeat()
+        _client = client
+        logger.info(f"ChromaDB connected (server): {host}:{port}")
+        return _client
 
-    if not _port_open(host, port):
-        raise RuntimeError(
-            f"ChromaDB is not reachable at {host}:{port}. Start the ChromaDB "
-            f"service (e.g. `docker compose up chromadb`) or set CHROMADB_HOST / "
-            f"CHROMADB_PORT to point at a running instance."
-        )
-
-    client = chromadb.HttpClient(host=host, port=port)
-
-    # Health check before caching — if the port is open but the service isn't
-    # healthy yet (e.g. still starting), don't poison the singleton with a dead
-    # client; leave _client unset so the next call retries.
-    client.heartbeat()
+    # Embedded, in-process, self-contained — persisted to disk, no server.
+    path = os.getenv("CHROMADB_PATH") or os.path.join("data", "chroma")
+    os.makedirs(path, exist_ok=True)
+    client = chromadb.PersistentClient(path=path)
     _client = client
-    logger.info(f"ChromaDB connected: {host}:{port}")
+    logger.info(f"ChromaDB connected (embedded): {path}")
     return _client
 
 
