@@ -866,6 +866,14 @@ async def _startup_event():
             _db.close()
     except Exception as e:
         logger.debug(f"Incognito purge skipped: {e}")
+    # Auto-connect the Local AI Cat companion: register the local cat server as
+    # a shared model endpoint so its live models appear in the picker with no
+    # manual setup. Idempotent + best-effort (never blocks startup).
+    try:
+        from src.cat_seed import seed_cat_endpoint
+        await asyncio.to_thread(seed_cat_endpoint)
+    except Exception as e:
+        logger.warning("Cat endpoint auto-seed skipped: %s", e)
     # Strong refs to fire-and-forget startup tasks. Without this, Python may
     # GC tasks created with `asyncio.create_task(...)` before they finish.
     _startup_tasks: list[asyncio.Task] = getattr(app.state, "_startup_tasks", [])
