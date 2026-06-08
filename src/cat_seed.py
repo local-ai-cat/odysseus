@@ -30,12 +30,50 @@ from __future__ import annotations
 import json
 import logging
 import os
+import urllib.request
 import uuid
 
 logger = logging.getLogger(__name__)
 
 CAT_ENDPOINT_NAME = "Local AI Cat"
 DEFAULT_CAT_BASE_URL = "http://127.0.0.1:11434/v1"
+
+# Model ids whose name marks them as non-chat regardless of metadata (defence in
+# depth on top of the capability check below).
+_NONCHAT_NAME_HINTS = ("whisper", "speech", "tts", "embed", "rerank", "moderation")
+
+
+def _classify_cat_models(base: str, api_key: str | None, timeout: float = 4.0):
+    """Fetch the cat's /v1/models and split chat LLMs from speech/transcription.
+
+    The cat tags real chat/vision models with `context_length`/`max_output_tokens`
+    in its OpenAI model list; speech models (whisper-1, apple-speech,
+    speech-analyzer) carry neither. We classify on that so transcription models
+    don't show up as selectable chat LLMs. Returns (all_ids, chat_ids,
+    nonchat_ids); on any failure returns ([], [], []) so the caller can fall back.
+    """
+    req = urllib.request.Request(base.rstrip("/") + "/models")
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode())
+    except Exception:
+        return [], [], []
+
+    all_ids, chat_ids, nonchat_ids = [], [], []
+    for m in data.get("data", []):
+        mid = m.get("id")
+        if not mid:
+            continue
+        all_ids.append(mid)
+        name_is_nonchat = any(h in mid.lower() for h in _NONCHAT_NAME_HINTS)
+        has_chat_caps = bool(m.get("context_length") or m.get("max_output_tokens"))
+        if has_chat_caps and not name_is_nonchat:
+            chat_ids.append(mid)
+        else:
+            nonchat_ids.append(mid)
+    return all_ids, chat_ids, nonchat_ids
 
 
 def _seed_enabled() -> bool:
@@ -72,7 +110,6 @@ def seed_cat_endpoint() -> dict:
 
     try:
         from core.database import ModelEndpoint, SessionLocal
-        from routes.model_routes import _probe_endpoint
         from src.endpoint_resolver import _first_chat_model, normalize_base
         from src.settings import load_settings, save_settings
     except Exception as e:  # noqa: BLE001
@@ -82,16 +119,17 @@ def seed_cat_endpoint() -> dict:
 
     base = normalize_base(_cat_base_url())
     result["base_url"] = base
+    api_key = os.getenv("LOCALAI_CAT_API_KEY") or None
 
     # /v1/models lists instantly even when the cat is cold (only generation is
-    # slow), so a short timeout is fine. Tolerate a down cat → register offline.
-    try:
-        models = _probe_endpoint(base, os.getenv("LOCALAI_CAT_API_KEY") or None, timeout=4) or []
-    except Exception as e:  # noqa: BLE001
-        logger.info("🔍 cat seed: probe failed (%s) — registering offline", e)
-        models = []
+    # slow), so a short timeout is fine. Classify chat LLMs vs speech models so
+    # transcription models (whisper-1, apple-speech, speech-analyzer) don't show
+    # up as selectable chat models. Tolerate a down cat → register offline.
+    models, chat_models, nonchat_models = _classify_cat_models(base, api_key)
     result["reachable"] = bool(models)
     result["models"] = len(models)
+    result["chat_models"] = len(chat_models)
+    result["nonchat_models"] = nonchat_models
 
     ep_id = None
     db = SessionLocal()
@@ -102,6 +140,8 @@ def seed_cat_endpoint() -> dict:
             changed = False
             if models:
                 existing.cached_models = json.dumps(models)
+                # Hide non-chat (speech) models from the chat picker.
+                existing.hidden_models = json.dumps(nonchat_models) if nonchat_models else None
                 changed = True
             if not existing.is_enabled:
                 existing.is_enabled = True
@@ -115,26 +155,30 @@ def seed_cat_endpoint() -> dict:
                 id=ep_id,
                 name=CAT_ENDPOINT_NAME,
                 base_url=base,
-                api_key=os.getenv("LOCALAI_CAT_API_KEY") or None,
+                api_key=api_key,
                 is_enabled=True,
                 model_type="llm",
                 endpoint_kind="local",
                 model_refresh_mode="auto",
                 model_refresh_interval=_refresh_interval(),
                 cached_models=json.dumps(models) if models else None,
-                owner=None,  # shared → visible to all users (incl. auth-disabled "")
+                # Speech/transcription models stay in cached_models (known to the
+                # system, available for a future STT hookup) but are hidden from
+                # the chat model picker.
+                hidden_models=json.dumps(nonchat_models) if nonchat_models else None,
+                owner=None,  # shared → visible to all users (incl. auth-disabled "local")
             ))
             db.commit()
             result["seeded"] = True
 
         # Make the cat the default chat endpoint/model if the user hasn't picked
-        # one yet (and we actually have a model to point at).
-        if models:
+        # one yet — pick from the CHAT models so we never default to a speech model.
+        if chat_models:
             try:
                 settings = load_settings()
                 if not settings.get("default_endpoint_id"):
                     settings["default_endpoint_id"] = ep_id
-                    settings["default_model"] = _first_chat_model(models) or ""
+                    settings["default_model"] = _first_chat_model(chat_models) or chat_models[0]
                     save_settings(settings)
             except Exception as e:  # noqa: BLE001
                 logger.warning("⚠️ cat seed: setting default model failed: %s", e)
@@ -146,8 +190,8 @@ def seed_cat_endpoint() -> dict:
 
     result["endpoint_id"] = ep_id
     if result["reachable"]:
-        logger.info("✅ cat seed: '%s' connected — %d models at %s",
-                    CAT_ENDPOINT_NAME, result["models"], base)
+        logger.info("✅ cat seed: '%s' connected — %d chat models (%d speech models hidden) at %s",
+                    CAT_ENDPOINT_NAME, result["chat_models"], len(nonchat_models), base)
     else:
         logger.info("🔍 cat seed: '%s' registered but cat not reachable at %s yet "
                     "(will auto-connect when it starts)", CAT_ENDPOINT_NAME, base)
