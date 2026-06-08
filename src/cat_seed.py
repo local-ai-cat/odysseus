@@ -43,6 +43,21 @@ DEFAULT_CAT_BASE_URL = "http://127.0.0.1:11434/v1"
 _NONCHAT_NAME_HINTS = ("whisper", "speech", "tts", "embed", "rerank", "moderation")
 
 
+def _preferred_default(chat_models: list[str]) -> str | None:
+    """Pick a friendly default chat model: skip reasoning (-r1), coder, vision
+    (-vl) and very large (120b/70b/...) models when a plain general instruct
+    model is available, so the first-run default is fast and conversational."""
+    if not chat_models:
+        return None
+    special = ("-r1", "reasoning", "-vl", "vl-", "coder", "embed")
+    huge = ("120b", "405b", "70b", "72b")
+    general = [m for m in chat_models if not any(s in m.lower() for s in special)]
+    pool = general or chat_models
+    smaller = [m for m in pool if not any(h in m.lower() for h in huge)]
+    pool = smaller or pool
+    return pool[0]
+
+
 def _classify_cat_models(base: str, api_key: str | None, timeout: float = 4.0):
     """Fetch the cat's /v1/models and split chat LLMs from speech/transcription.
 
@@ -171,15 +186,22 @@ def seed_cat_endpoint() -> dict:
             db.commit()
             result["seeded"] = True
 
-        # Make the cat the default chat endpoint/model if the user hasn't picked
-        # one yet — pick from the CHAT models so we never default to a speech model.
+        # Make the cat the default chat endpoint/model when none is chosen yet,
+        # AND self-heal a default that points at a now-hidden speech model (an
+        # earlier build could pick apple-speech). Pick from CHAT models only.
         if chat_models:
             try:
                 settings = load_settings()
-                if not settings.get("default_endpoint_id"):
+                cur_model = settings.get("default_model") or ""
+                no_default = not settings.get("default_endpoint_id")
+                bad_default = cur_model in nonchat_models  # e.g. a speech model
+                if no_default or bad_default:
                     settings["default_endpoint_id"] = ep_id
-                    settings["default_model"] = _first_chat_model(chat_models) or chat_models[0]
+                    settings["default_model"] = _preferred_default(chat_models) or _first_chat_model(chat_models) or chat_models[0]
                     save_settings(settings)
+                    if bad_default:
+                        logger.info("🔧 cat seed: reset default model %r → %r (speech model is not a chat model)",
+                                    cur_model, settings["default_model"])
             except Exception as e:  # noqa: BLE001
                 logger.warning("⚠️ cat seed: setting default model failed: %s", e)
     except Exception as e:  # noqa: BLE001

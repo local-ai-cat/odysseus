@@ -56,6 +56,10 @@ def _grep_files(pattern: str) -> set[str]:
             continue
         if rel.startswith(".claude/") or "/.claude/" in rel:
             continue
+        # Build output (PyInstaller .app bundles, venvs) embeds copies of the
+        # source tree + tests; don't scan those or a local dev build trips this.
+        if any(seg in ("dist", "build", "venv", ".venv") for seg in rel.split("/")):
+            continue
         try:
             body = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
