@@ -4,6 +4,12 @@ import os
 from typing import Optional
 from fastapi import Request, HTTPException
 
+# Stable identity for the single user when auth is turned off (AUTH_ENABLED=false,
+# e.g. the desktop companion). Ownership-bearing data (sessions, chat history) is
+# both stamped and checked against this, so a no-login user can actually create
+# and own data instead of tripping the "Authentication required" guard.
+SINGLE_USER = "local"
+
 
 def get_current_user(request: Request) -> Optional[str]:
     """Get current username from request state (set by auth middleware)."""
@@ -31,7 +37,16 @@ def effective_user(request: Request):
         owner = getattr(request.state, "api_token_owner", None)
         if owner:
             return owner
-    return get_current_user(request)
+    user = get_current_user(request)
+    if user:
+        return user
+    # Auth turned off → resolve to the stable single user so ownership checks
+    # (session_routes require_session_owner, document routes, etc.) pass and
+    # data created here is consistently owned. Must return a TRUTHY value: the
+    # guards do `if not user: raise 403`, so "" would still fail.
+    if _auth_disabled():
+        return SINGLE_USER
+    return user
 
 
 def _auth_disabled() -> bool:
