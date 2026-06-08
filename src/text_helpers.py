@@ -42,6 +42,41 @@ _GEMMA_THOUGHT_CHANNEL_CAPTURE_RE = re.compile(
     r"<\|channel>thought\s*\n?([\s\S]*?)<channel\|>\s*",
     re.IGNORECASE,
 )
+# gpt-oss "harmony" format. The cat returns raw harmony tokens in `content`:
+#   <|channel|>analysis<|message|>REASONING<|end|><|start|>assistant
+#   <|channel|>final<|message|>ANSWER
+# Tool calls go in a `commentary` channel. We keep the `final` answer, wrap
+# `analysis`/`commentary` reasoning in <think>, and drop the control tokens.
+_HARMONY_HEADER_RE = re.compile(r"<\|channel\|>\s*(\w+)[\s\S]*?<\|message\|>", re.IGNORECASE)
+_HARMONY_CTRL_RE = re.compile(
+    r"<\|(?:start|end|return|call|constrain|message|channel)\|>(?:assistant|json)?",
+    re.IGNORECASE,
+)
+
+
+def _normalize_harmony(text: str) -> str:
+    """Convert gpt-oss harmony channels to <think> + plain final answer."""
+    if "<|channel|>" not in text and "<|message|>" not in text:
+        return text
+    headers = list(_HARMONY_HEADER_RE.finditer(text))
+    if not headers:
+        # Mangled/partial harmony (e.g. "assistantcommentary") with no parseable
+        # message — just strip the control tokens so noise doesn't render.
+        return _HARMONY_CTRL_RE.sub("", text)
+    parts = []
+    for i, h in enumerate(headers):
+        channel = h.group(1).lower()
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+        content = text[h.end():end]
+        # Cut at the first trailing control token (<|end|>, <|start|>assistant…).
+        content = _HARMONY_CTRL_RE.split(content)[0].strip()
+        if not content:
+            continue
+        if channel == "final":
+            parts.append(content)
+        else:  # analysis, commentary, … → reasoning
+            parts.append(f"<think>{content}</think>")
+    return "\n".join(parts) if parts else _HARMONY_CTRL_RE.sub("", text)
 # Qwen and a few other models prefix the response with a "Thinking Process:"
 # block before the real answer.
 _QWEN_THINKING_RE = re.compile(
@@ -103,6 +138,7 @@ def normalize_thinking_markup(text: str) -> str:
     """
     if not text:
         return text
+    text = _normalize_harmony(text)
     out = _THOUGHT_TAG_OPEN_RE.sub(lambda m: "<think" + (m.group(1) or "") + ">", text)
     out = _THOUGHT_TAG_CLOSE_RE.sub("</think>", out)
 

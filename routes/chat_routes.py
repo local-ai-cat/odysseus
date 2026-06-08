@@ -359,7 +359,9 @@ def setup_chat_routes(
             owner=ctx.user,
         )
 
-        return {"response": reply}
+        # Return the cleaned reply (reasoning extracted into metadata), not the
+        # raw model output — otherwise harmony/think tokens leak to API callers.
+        return {"response": _clean_reply or reply}
 
     # ------------------------------------------------------------------ #
     # POST /api/chat_stream

@@ -42,3 +42,20 @@ def test_strip_think_handles_empty_gemma4_thought_channel():
 def test_strip_think_unwraps_gemma4_response_channel():
     text = "<|channel>thought\ninternal reasoning<channel|><|channel>response\nFinal answer.<channel|>"
     assert strip_think(text) == "Final answer."
+
+
+def test_gpt_oss_harmony_channels():
+    """gpt-oss 'harmony' channels: keep the final answer, drop reasoning."""
+    from src.text_helpers import normalize_thinking_markup
+    harmony = (
+        '<|channel|>analysis<|message|>User says "hi". Greet them.'
+        '<|end|><|start|>assistant<|channel|>final<|message|>Hey there!'
+    )
+    # Reasoning is wrapped into <think>, final answer preserved.
+    norm = normalize_thinking_markup(harmony)
+    assert "<think>" in norm and "Hey there!" in norm
+    assert "<|channel|>" not in norm and "<|message|>" not in norm
+    # strip_think then yields the clean user-facing answer.
+    assert strip_think(harmony) == "Hey there!"
+    # Plain text is untouched.
+    assert strip_think("just a normal answer") == "just a normal answer"
