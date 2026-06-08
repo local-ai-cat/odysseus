@@ -107,6 +107,8 @@ fi
   --hidden-import chromadb_rust_bindings \
   --collect-all tokenizers \
   --collect-all huggingface_hub \
+  --collect-all duckduckgo_search \
+  --collect-submodules bs4 \
   --collect-data certifi \
   --collect-all webview \
   --hidden-import app \

@@ -186,24 +186,49 @@ def seed_cat_endpoint() -> dict:
             db.commit()
             result["seeded"] = True
 
-        # Make the cat the default chat endpoint/model when none is chosen yet,
-        # AND self-heal a default that points at a now-hidden speech model (an
-        # earlier build could pick apple-speech). Pick from CHAT models only.
-        if chat_models:
+        # One settings pass: pick a sensible default chat model and wire the
+        # cat's whisper as the speech-to-text provider. Only fills unset/invalid
+        # values so a user's explicit choices are never overwritten.
+        if models:
             try:
                 settings = load_settings()
-                cur_model = settings.get("default_model") or ""
-                no_default = not settings.get("default_endpoint_id")
-                bad_default = cur_model in nonchat_models  # e.g. a speech model
-                if no_default or bad_default:
-                    settings["default_endpoint_id"] = ep_id
-                    settings["default_model"] = _preferred_default(chat_models) or _first_chat_model(chat_models) or chat_models[0]
+                dirty = False
+
+                # Default chat endpoint/model — set when none chosen, and
+                # self-heal a default that points at a hidden speech model (an
+                # earlier build could pick apple-speech). Choose from chat models.
+                if chat_models:
+                    cur_model = settings.get("default_model") or ""
+                    no_default = not settings.get("default_endpoint_id")
+                    bad_default = cur_model in nonchat_models
+                    if no_default or bad_default:
+                        settings["default_endpoint_id"] = ep_id
+                        settings["default_model"] = (
+                            _preferred_default(chat_models)
+                            or _first_chat_model(chat_models)
+                            or chat_models[0]
+                        )
+                        dirty = True
+                        if bad_default:
+                            logger.info("🔧 cat seed: reset default model %r → %r (speech model is not a chat model)",
+                                        cur_model, settings["default_model"])
+
+                # Speech-to-text — point it at the cat's whisper model. Verified
+                # the cat serves /v1/audio/transcriptions with whisper-1
+                # (apple-speech is not a transcription model). Only when STT is
+                # still off, so we don't clobber a user's own STT config.
+                whisper = next((m for m in nonchat_models if "whisper" in m.lower()), None)
+                if whisper and (settings.get("stt_provider") or "disabled") == "disabled":
+                    settings["stt_provider"] = f"endpoint:{ep_id}"
+                    settings["stt_model"] = whisper
+                    settings["stt_enabled"] = True
+                    dirty = True
+                    logger.info("🎙️ cat seed: speech-to-text → cat %s", whisper)
+
+                if dirty:
                     save_settings(settings)
-                    if bad_default:
-                        logger.info("🔧 cat seed: reset default model %r → %r (speech model is not a chat model)",
-                                    cur_model, settings["default_model"])
             except Exception as e:  # noqa: BLE001
-                logger.warning("⚠️ cat seed: setting default model failed: %s", e)
+                logger.warning("⚠️ cat seed: applying settings failed: %s", e)
     except Exception as e:  # noqa: BLE001
         logger.warning("⚠️ cat seed: db write failed: %s", e)
         result["reason"] = f"db write failed: {e}"

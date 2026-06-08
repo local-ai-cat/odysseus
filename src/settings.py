@@ -48,11 +48,14 @@ DEFAULT_SETTINGS = {
     "stt_provider": "disabled",
     "stt_model": "base",
     "stt_language": "",
-    "search_provider": "searxng",
-    # Default fallback chain — when the primary provider fails or
-    # rate-limits, we try DuckDuckGo next. Free, no API key required, so
-    # safe to ship on by default for every user.
-    "search_fallback_chain": ["duckduckgo"],
+    # The desktop companion ships with no SearXNG instance, so default to
+    # DuckDuckGo (free, no API key, no self-hosting). Defaulting to searxng
+    # made every search 404 against localhost:8080 before falling back.
+    # Self-hosted/Docker deployments can switch back to searxng in Settings.
+    "search_provider": "duckduckgo",
+    # Fallback chain — when the primary provider fails or rate-limits, try
+    # SearXNG next (a no-op unless the operator runs one).
+    "search_fallback_chain": ["searxng"],
     "search_url": "",
     "search_result_count": 5,
     # SafeSearch level applied to every provider that exposes one.
