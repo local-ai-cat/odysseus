@@ -138,7 +138,60 @@ def _wait_until_up(port, timeout=60):
     return False
 
 
+def _maybe_run_tests() -> bool:
+    """Dev builds bundle tests/; run them in-process so the frozen bundle itself
+    is testable. Invoke as:  "Odysseus dev" --run-tests [pytest args...]
+    (also accepts the `-m pytest` shape). Prod builds strip tests/ — there we
+    print a clear message and exit non-zero instead of launching the server.
+    """
+    argv = sys.argv[1:]
+    if argv[:1] == ["--run-tests"]:
+        pytest_args = argv[1:]
+    elif argv[:2] == ["-m", "pytest"]:
+        pytest_args = argv[2:]
+    else:
+        return False
+
+    os.chdir(ROOT)
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    tests_dir = ROOT / "tests"
+    if not tests_dir.is_dir():
+        print("no bundled tests/ — this is a trimmed prod build; run `make test` "
+              "against the source repo instead", flush=True)
+        raise SystemExit(2)
+    try:
+        import pytest
+    except ImportError:
+        print("pytest not bundled in this build", flush=True)
+        raise SystemExit(2)
+
+    # Frozen-bundle defaults: a runtime-optimized .app omits a few test-only
+    # deps (fastapi.testclient, the scripts/ pkg, source .py loaded by path), so
+    # a handful of modules can't be collected — continue past them rather than
+    # abort. Point pytest at the bundled config for rootdir + asyncio_mode.
+    # pytest-asyncio auto-registers via its bundled metadata (--copy-metadata),
+    # so we must NOT also load it with -p (that double-registers and errors).
+    # NOTE: a frozen, runtime-optimized bundle is NOT a fully-green test env —
+    # integration tests that need fastapi.testclient, the scripts/ pkg, network,
+    # or source .py loaded by path can't run here. This runner is a smoke check
+    # that the bundled code imports and pure unit tests pass; the canonical
+    # full-green run is `make test` against the repo venv.
+    defaults = ["-p", "no:cacheprovider", "--continue-on-collection-errors"]
+    cfg = ROOT / "pyproject.toml"
+    if cfg.is_file():
+        defaults += ["-c", str(cfg)]
+    # Only default to the whole tree when the caller didn't name specific paths.
+    has_paths = any(not a.startswith("-") for a in pytest_args)
+    target = [] if has_paths else [str(tests_dir)]
+    raise SystemExit(pytest.main([*defaults, *target, *pytest_args]))
+
+
 def main():
+    # A dev bundle can run its own test suite instead of starting the server.
+    if _maybe_run_tests():
+        return
+
     # constants.py + the StaticFiles("static") mount are relative to CWD/__file__
     # in the repo layout; make the bundle's Resources dir the working tree.
     os.chdir(ROOT)
