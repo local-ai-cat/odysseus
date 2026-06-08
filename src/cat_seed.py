@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import urllib.error
 import urllib.request
 import uuid
 
@@ -97,6 +98,24 @@ def _seed_enabled() -> bool:
 
 def _cat_base_url() -> str:
     return os.getenv("LOCALAI_CAT_BASE_URL", DEFAULT_CAT_BASE_URL).strip() or DEFAULT_CAT_BASE_URL
+
+
+def _searxng_works(url: str, timeout: float = 1.5) -> bool:
+    """True only if a real SearXNG answers its JSON search API at `url`.
+
+    A plain liveness ping is not enough: some other dev service may sit on
+    localhost:8080 and return 404 for /search. SearXNG's JSON API returns 200
+    with a JSON body, so require that.
+    """
+    probe = url.rstrip("/") + "/search?q=ping&format=json"
+    try:
+        with urllib.request.urlopen(probe, timeout=timeout) as r:
+            if r.status != 200:
+                return False
+            json.loads(r.read().decode())  # must be JSON
+            return True
+    except Exception:
+        return False
 
 
 def _refresh_interval() -> int:
@@ -224,6 +243,18 @@ def seed_cat_endpoint() -> dict:
                     settings["stt_enabled"] = True
                     dirty = True
                     logger.info("🎙️ cat seed: speech-to-text → cat %s", whisper)
+
+                # Self-heal a stale searxng search provider when no SearXNG is
+                # reachable. The companion ships none, and an earlier build
+                # materialized "searxng" into settings.json (so the duckduckgo
+                # default never applied) — it would 404 localhost:8080 on every
+                # search before falling back. Leave a reachable/custom SearXNG.
+                if settings.get("search_provider") == "searxng":
+                    sx_url = (settings.get("search_url") or "http://localhost:8080").rstrip("/")
+                    if not _searxng_works(sx_url):
+                        settings["search_provider"] = "duckduckgo"
+                        dirty = True
+                        logger.info("🔧 cat seed: search provider searxng (unreachable at %s) → duckduckgo", sx_url)
 
                 if dirty:
                     save_settings(settings)
