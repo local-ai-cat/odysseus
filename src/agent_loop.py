@@ -15,7 +15,7 @@ import logging
 from typing import AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
-from src.llm_core import stream_llm, stream_llm_with_fallback, _is_ollama_native_url
+from src.llm_core import stream_llm, stream_llm_with_fallback, _is_ollama_native_url, _summarize_stream_error
 from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
@@ -1674,6 +1674,7 @@ async def stream_agent_loop(
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
+        _round_errored = False  # upstream yielded `event: error` this round → stop cleanly
         # Reset doc streaming state per round
         _doc_acc = ""
         _doc_opened = False
@@ -1747,10 +1748,19 @@ async def stream_agent_loop(
             if time.time() > _round_deadline:
                 logger.warning(f"[agent] round {round_num} stream exceeded wall-clock deadline; cutting off")
                 break
-            # Forward error events from stream_llm to the frontend
+            # Forward error events from stream_llm to the frontend, then surface
+            # them as a visible delta and stop. A raw `event: error` SSE frame
+            # alone leaves the agent UI spinning forever (the frontend only
+            # clears the "Thinking" state on a delta/[DONE]); converting it to
+            # text and breaking guarantees the terminal [DONE] below fires, so a
+            # mid-loop upstream failure (e.g. a 500 on the post-tool turn) ends
+            # the turn cleanly instead of hanging.
             if chunk.startswith("event: error"):
                 yield chunk
-                continue
+                _reason = _summarize_stream_error(chunk)
+                yield f'data: {json.dumps({"delta": chr(10) + chr(10) + "*[Error: " + _reason + "]*"})}\n\n'
+                _round_errored = True
+                break
             if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                 try:
                     data = json.loads(chunk[6:])
@@ -1884,6 +1894,12 @@ async def stream_agent_loop(
                 # Forward error events to frontend as visible text
                 yield chunk
             # Intercept [DONE] — don't forward until all rounds finish
+
+        # An upstream error this round (already surfaced as a delta above) ends
+        # the turn: skip tool resolution / re-looping and fall through to the
+        # terminal [DONE] so the UI never hangs.
+        if _round_errored:
+            break
 
         tool_blocks, used_native = _resolve_tool_blocks(round_response, native_tool_calls, round_num)
 
