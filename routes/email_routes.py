@@ -59,6 +59,30 @@ ODYSSEUS_MAIL_ORIGIN = "odysseus-ui"
 EMAIL_COMPOSE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 
 
+def _friendly_mail_error(exc: Exception) -> str:
+    """Turn a raw mail-stack exception into a user-facing message.
+
+    Connection failures (no mail server configured, server down, wrong host/port)
+    surface as bare OSErrors like "[Errno 61] Connection refused", which read as a
+    crash rather than "set this up". Map those to a setup hint; otherwise return a
+    short, non-leaky detail.
+    """
+    detail = str(exc).strip()
+    lowered = detail.lower()
+    if (
+        isinstance(exc, (ConnectionError, TimeoutError))
+        or "connection refused" in lowered
+        or "connection reset" in lowered
+        or "name or service not known" in lowered
+        or "nodename nor servname" in lowered
+        or "timed out" in lowered
+        or "errno 61" in lowered
+        or "errno 8" in lowered
+    ):
+        return "Couldn't reach your mail server. Connect an account in Settings → Integrations."
+    return f"Mail operation failed: {detail[:180]}" if detail else "Mail operation failed"
+
+
 def _email_tag_owner_aliases(account_id: str | None, owner: str = "") -> list[str]:
     aliases = [owner or ""]
     try:
@@ -950,8 +974,7 @@ def setup_email_routes():
             return {"emails": emails, "total": total, "folder": folder, "offset": offset}
         except Exception as e:
             logger.error(f"Failed to list emails: {e}")
-            detail = str(e).strip()
-            return {"emails": [], "total": 0, "error": f"Mail operation failed: {detail[:180]}" if detail else "Mail operation failed"}
+            return {"emails": [], "total": 0, "error": _friendly_mail_error(e)}
         finally:
             if conn:
                 try:
